@@ -1,4 +1,4 @@
-name: Sideload
+name: Sideload ios
 
 on:
   release:
