@@ -1,4 +1,4 @@
-name: Sideload Release
+name: Sideload
 
 on:
   release:
