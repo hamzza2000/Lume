@@ -1,0 +1,170 @@
+name: Sideload Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re)build sideload assets for (e.g. v1.2.0)
+        required: true
+      engine_ref:
+        description: LumeEngine ref to build against (defaults to the pinned version)
+        required: false
+      recorder_ref:
+        description: LumeRecorder ref to build against (defaults to the pinned version)
+        required: false
+      cloud_ref:
+        description: LumeCloud ref to build against (defaults to the pinned version)
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+  ENGINE_REF: ${{ github.event.inputs.engine_ref || 'v0.5.0' }}
+  RECORDER_REF: ${{ github.event.inputs.recorder_ref || 'v0.1.1' }}
+  CLOUD_REF: ${{ github.event.inputs.cloud_ref || 'main' }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} Sideload
+    runs-on: xcode-27
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            destination: generic/platform=iOS
+            format: ipa
+          - platform: tvOS
+            destination: generic/platform=tvOS
+            format: ipa
+          - platform: macOS
+            destination: generic/platform=macOS
+            format: zip
+
+    defaults:
+      run:
+        working-directory: Lume
+
+    steps:
+      - name: Check release tag
+        working-directory: ${{ runner.temp }}
+        env:
+          TAG_TO_CHECK: ${{ env.RELEASE_TAG }}
+        run: |
+          echo "Checking tag: $TAG_TO_CHECK"
+
+          for repo in hamzza2000/Lume bilipp/Lume; do
+            echo "Checking $repo"
+
+            if git ls-remote --exit-code --tags \
+              "https://github.com/$repo.git" \
+              "refs/tags/$TAG_TO_CHECK" \
+              "refs/tags/$TAG_TO_CHECK^{}"; then
+              echo "Tag found in $repo"
+            else
+              echo "Tag not found in $repo"
+            fi
+          done
+
+      - name: Checkout Lume
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: Lume
+
+      - name: Checkout LumeEngine
+        uses: actions/checkout@v5
+        with:
+          repository: bilipp/LumeEngine
+          ref: ${{ env.ENGINE_REF }}
+          path: LumeEngine
+
+      - name: Checkout LumeRecorder
+        uses: actions/checkout@v5
+        with:
+          repository: bilipp/LumeRecorder
+          ref: ${{ env.RECORDER_REF }}
+          path: LumeRecorder
+
+      - name: Checkout LumeCloud
+        uses: actions/checkout@v5
+        with:
+          repository: bilipp/LumeCloud
+          ref: ${{ env.CLOUD_REF }}
+          path: LumeCloud
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+
+      - name: Download Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Write .env
+        env:
+          TMDB_ACCESS_TOKEN: ${{ secrets.TMDB_ACCESS_TOKEN }}
+          MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
+          INTRO_DB_API_KEY: ${{ secrets.INTRO_DB_API_KEY }}
+          OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: $${{ secrets.TRAKT_CLIENT_SECRET }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+          SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
+          MDBLIST_CLIENT_ID: ${{ secrets.MDBLIST_CLIENT_ID }}
+        run: |
+          {
+            [ -n "$TMDB_ACCESS_TOKEN" ]     && echo "TMDB_ACCESS_TOKEN=$TMDB_ACCESS_TOKEN"
+            [ -n "$MDBLIST_API_KEY" ]       && echo "MDBLIST_API_KEY=$MDBLIST_API_KEY"
+            [ -n "$INTRO_DB_API_KEY" ]      && echo "INTRO_DB_API_KEY=$INTRO_DB_API_KEY"
+            [ -n "$OPENSUBTITLES_API_KEY" ] && echo "OPENSUBTITLES_API_KEY=$OPENSUBTITLES_API_KEY"
+            [ -n "$TRAKT_CLIENT_ID" ]       && echo "TRAKT_CLIENT_ID=$TRAKT_CLIENT_ID"
+            [ -n "$TRAKT_CLIENT_SECRET" ]   && echo "TRAKT_CLIENT_SECRET=$TRAKT_CLIENT_SECRET"
+            [ -n "$SIMKL_CLIENT_ID" ]       && echo "SIMKL_CLIENT_ID=$SIMKL_CLIENT_ID"
+            [ -n "$SIMKL_CLIENT_SECRET" ]   && echo "SIMKL_CLIENT_SECRET=$SIMKL_CLIENT_SECRET"
+            [ -n "$MDBLIST_CLIENT_ID" ]     && echo "MDBLIST_CLIENT_ID=$MDBLIST_CLIENT_ID"
+          } > .env || true
+
+      - name: Archive (Sideload, unsigned)
+        run: |
+          xcodebuild archive \
+            -project Lume.xcodeproj \
+            -scheme Lume \
+            -configuration Sideload \
+            -destination '${{ matrix.destination }}' \
+            -archivePath "$RUNNER_TEMP/Lume-Sideload.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ENABLE_HARDENED_RUNTIME=NO
+
+      - name: Package IPA
+        if: matrix.format == 'ipa'
+        run: |
+          VERSION="$RELEASE_TAG"
+          APP=$(find "$RUNNER_TEMP/Lume-Sideload.xcarchive/Products" -name "*.app" | head -1)
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -r "$RUNNER_TEMP/Lume-${VERSION}-${{ matrix.platform }}-Sideload.ipa" Payload
+
+      - name: Package zip
+        if: matrix.format == 'zip'
+        run: |
+          VERSION="$RELEASE_TAG"
+          APP=$(find "$RUNNER_TEMP/Lume-Sideload.xcarchive/Products" -name "*.app" | head -1)
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$APP" \
+            "$RUNNER_TEMP/Lume-${VERSION}-macOS-Sideload.zip"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ runner.temp }}/Lume-${{ env.RELEASE_TAG }}-${{ matrix.platform }}-Sideload.${{ matrix.format }}
